@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+vendor/
+models/
+worlds/
+bridge.yaml
+data/
+history/
+logs/
+*.pid
+.*.lock
+.env
+.env.*

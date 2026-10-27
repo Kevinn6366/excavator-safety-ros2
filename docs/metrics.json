@@ -1,0 +1,24 @@
+{
+  "frames_saved": 480,
+  "processing_ms_p95": 33.40795949952735,
+  "control_samples": 1289,
+  "healthy_samples": 1288,
+  "scope": "synthetic color-coded targets; not real pedestrian accuracy",
+  "reference_policy": "static proximity classification only: exact box clearance minus margin; directional AEB validated separately",
+  "trials": 24,
+  "trial_detected": 24,
+  "trial_missed": 0,
+  "trial_detection_rate": 1.0,
+  "unmatched_detection_observations": 0,
+  "level_correct_rate": 1.0,
+  "overwarning_trials": 0,
+  "underwarning_trials": 0,
+  "response_observed_upper_bound_sim_seconds_p95": 0.4036999999999994,
+  "response_definition": "last ROS clock observed before synchronous set_pose calls to first healthy correct state; includes CLI service time and stale clock; an upper-bound observation, not end-to-end latency",
+  "calibration": {
+    "perturbation": "pitch +1 degree; base x translation +2 cm",
+    "distance_error_p95_m": 0.017204200701256722,
+    "boundary_crossings_per_valid_point": 0.00021572355027032857,
+    "note": "visible nonground points; multiple boundary crossings can count more than once"
+  }
+}
