@@ -1,0 +1,261 @@
+from excavator_safety.paths import ROOT
+
+"""Actual Gazebo tests for signed motion, yaw, heartbeat expiry and AEB.
+Ground truth odometry is used for test placement/assertions only.
+"""
+
+import json, time, math, threading, subprocess, urllib.request
+from pathlib import Path
+import rclpy
+from nav_msgs.msg import Odometry
+from rclpy.qos import qos_profile_sensor_data
+
+BASE = "http://127.0.0.1:8080"
+OUT = Path(ROOT / "evidence/wasd")
+OUT.mkdir(parents=True, exist_ok=True)
+
+
+def state():
+    return json.load(urllib.request.urlopen(BASE + "/api/state", timeout=4))
+
+
+for _ in range(50):
+    try:
+        token = state()["control_token"]
+        break
+    except OSError:
+        time.sleep(0.2)
+else:
+    raise RuntimeError("Dashboard unavailable")
+
+
+def post(path, payload):
+    r = urllib.request.Request(
+        BASE + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "X-Local-Control": token},
+    )
+    return json.load(urllib.request.urlopen(r, timeout=4))
+
+
+def wait(fn, seconds=45):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        s = state()
+        if fn(s):
+            return s
+        time.sleep(0.12)
+    raise AssertionError("Timed out waiting for motion condition")
+
+
+rclpy.init()
+node = rclpy.create_node("motion_test_fixture")
+pose = [0.0, 0.0, 0.0]
+
+
+def odom(m):
+    q = m.pose.pose.orientation
+    pose[:] = [
+        m.pose.pose.position.x,
+        m.pose.pose.position.y,
+        math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)),
+    ]
+
+
+node.create_subscription(Odometry, "/safety/odom", odom, qos_profile_sensor_data)
+threading.Thread(target=lambda: rclpy.spin(node), daemon=True).start()
+command = (0.0, 0.0)
+paused = True
+done = False
+errors = []
+
+
+def heartbeat():
+    while not done:
+        if not paused:
+            try:
+                post("/api/teleop", dict(zip(["speed", "yaw"], command)))
+            except Exception as e:
+                errors.append(str(e))
+        time.sleep(0.12)
+
+
+threading.Thread(target=heartbeat, daemon=True).start()
+
+
+def stop():
+    global command, paused
+    command = (0.0, 0.0)
+    paused = True
+    post("/api/drive", {"speed": 0})
+    return wait(
+        lambda s: abs(s["status"]["measured_speed"]) < 0.005
+        and abs(s["status"]["measured_yaw"]) < 0.005
+    )
+
+
+def job(action, **kw):
+    post("/api/action", dict(action=action, **kw))
+    s = wait(lambda s: s["simulation"]["job"]["state"] != "running", 75)
+    assert s["simulation"]["job"]["state"] == "success", s["simulation"]
+    return s
+
+
+def clear():
+    stop()
+    job("reset")
+    wait(lambda s: s["status"] and s["status"]["healthy"])
+    job("randomize", people=0, obstacles=0)
+    wait(lambda s: s["status"]["distance"] > 50)
+
+
+def motion(v, w):
+    global command, paused
+    command = (v, w)
+    paused = False
+
+
+def run_sim(seconds):
+    begin = state()["status"]["stamp"]
+    samples = []
+    end = time.monotonic() + 40
+    while time.monotonic() < end:
+        s = state()["status"]
+        samples.append(s)
+        if s["stamp"] - begin >= seconds:
+            return samples
+        time.sleep(0.1)
+    raise AssertionError("Simulation did not advance")
+
+
+def obstacle(bx, by):
+    x, y, yaw = pose
+    gx = x + bx * math.cos(yaw) - by * math.sin(yaw)
+    gy = y + bx * math.sin(yaw) + by * math.cos(yaw)
+    req = f'name: "target_0" position: {{x: {gx} y: {gy} z: 0}} orientation: {{w: 1}}'
+    p = subprocess.run(
+        [
+            "gz",
+            "service",
+            "-s",
+            "/world/safety/set_pose",
+            "--reqtype",
+            "gz.msgs.Pose",
+            "--reptype",
+            "gz.msgs.Boolean",
+            "--timeout",
+            "5000",
+            "--req",
+            req,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert "true" in p.stdout
+
+
+report = {}
+records = {}
+try:
+    if not state()["simulation"]["running"]:
+        job("start")
+    wait(lambda s: s["status"] and s["status"]["healthy"])
+    clear()
+    motion(1.2, 0)
+    records["linear_forward"] = run_sim(2.0)
+    slope = [
+        (b["command"] - a["command"]) / (b["stamp"] - a["stamp"])
+        for a, b in zip(records["linear_forward"], records["linear_forward"][1:])
+        if b["stamp"] > a["stamp"] and 0.05 < a["command"] < 0.7
+    ]
+    assert slope and all(abs(a - 0.4) < 0.005 for a in slope), slope
+    report["linear_forward"] = {
+        "passed": True,
+        "accel_m_s2": sum(slope) / len(slope),
+        "pose": pose.copy(),
+    }
+    stop()
+    print("PASS linear acceleration", flush=True)
+    clear()
+    motion(-1.2, 0)
+    records["reverse"] = run_sim(3.0)
+    assert pose[0] < -0.8 and state()["status"]["measured_speed"] < -0.8
+    report["reverse"] = {
+        "passed": True,
+        "pose": pose.copy(),
+        "status": state()["status"],
+    }
+    stop()
+    print("PASS reverse", flush=True)
+    clear()
+    motion(1.0, 0.4)
+    records["left_turn"] = run_sim(3.0)
+    assert pose[2] > 0.5 and pose[1] > 0.15, pose
+    report["left_turn"] = {
+        "passed": True,
+        "pose": pose.copy(),
+        "status": state()["status"],
+    }
+    stop()
+    print("PASS left turn", flush=True)
+    clear()
+    motion(-1.0, -0.4)
+    records["reverse_right"] = run_sim(3.0)
+    assert pose[2] < -0.5 and pose[0] < -0.4, pose
+    report["reverse_right"] = {
+        "passed": True,
+        "pose": pose.copy(),
+        "status": state()["status"],
+    }
+    paused = True
+    s = wait(
+        lambda s: s["status"]["input_timeout"]
+        and abs(s["status"]["measured_speed"]) < 0.005
+        and abs(s["status"]["measured_yaw"]) < 0.005,
+        15,
+    )
+    report["deadman"] = {"passed": True, "status": s["status"]}
+    print("PASS reverse right turn + input timeout", flush=True)
+    clear()
+    motion(-1.3, 0)
+    wait(lambda s: s["status"]["measured_speed"] < -1.0)
+    obstacle(-4.0, 0.0)
+    trigger = wait(lambda s: s["status"]["aeb_active"], 20)["status"]
+    s = wait(
+        lambda s: s["status"]["aeb_active"]
+        and abs(s["status"]["measured_speed"]) < 0.005,
+        15,
+    )
+    assert s["status"]["distance"] > 0.25
+    report["reverse_aeb"] = {"passed": True, "trigger": trigger, "stopped": s["status"]}
+    print("PASS reverse AEB", flush=True)
+    clear()
+    motion(0.6, 0.4)
+    wait(lambda s: s["status"]["measured_yaw"] > 0.35)
+    obstacle(0.0, 2.1)
+    trigger = wait(lambda s: s["status"]["aeb_active"], 10)["status"]
+    s = wait(
+        lambda s: s["status"]["aeb_active"]
+        and abs(s["status"]["measured_speed"]) < 0.005
+        and abs(s["status"]["measured_yaw"]) < 0.005,
+        15,
+    )
+    assert s["status"]["distance"] > 0.15
+    report["turning_aeb"] = {"passed": True, "trigger": trigger, "stopped": s["status"]}
+    print("PASS turning AEB (linear and angular stopped)", flush=True)
+    report["passed"] = True
+    report["heartbeat_errors"] = errors
+    (OUT / "integration.json").write_text(json.dumps(report, indent=2))
+    (OUT / "motion_samples.json").write_text(json.dumps(records, indent=2))
+finally:
+    done = True
+    stop()
+    job("reset")
+    s = wait(
+        lambda s: s["status"] and s["status"]["healthy"] and s["panorama"]["online"]
+    )
+    (OUT / "final_state.json").write_text(json.dumps(s["status"], indent=2))
+    node.destroy_node()
+    rclpy.shutdown()
+    print("RESTORED stationary", flush=True)

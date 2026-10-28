@@ -13,3 +13,7 @@ logs/
 .*.lock
 .env
 .env.*
+evidence/
+*.egg-info/
+build/
+dist/

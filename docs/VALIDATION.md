@@ -8,4 +8,4 @@
 
 动态验证覆盖前方 AEB 后倒车、后方 AEB 后前进、转弯 AEB、滑行减速与碰撞后驶离。静态近距等级与动态路径 AEB 分别评价。前后脱离测试的停车净空分别为 0.818 m 与 0.984 m；滑行指令速度斜率为 −0.25 m/s²。
 
-复现顺序：启动仿真，运行 scenario.py，再运行 evaluate.py；动态测试另行运行 integration_path.py。每组运行使用独立的数据目录与时间轴，避免跨运行合并统计。
+复现顺序：启动仿真，运行 `excavator_safety.evaluation.scenario`，再运行 `excavator_safety.evaluation.metrics`；动态测试另行运行 `tests/integration/integration_path.py`。每组运行使用独立的数据目录与时间轴，避免跨运行合并统计。
